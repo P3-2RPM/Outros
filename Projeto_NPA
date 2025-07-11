@@ -1,0 +1,236 @@
+-- Início da definição das Common Table Expressions (CTEs)
+
+WITH
+
+-- CTE: LETALIDADE - Filtra ocorrências letais com envolvimento de militar em serviço
+LETALIDADE AS (
+    SELECT
+        OCO.numero_ocorrencia,
+        ENV.digitador_id_orgao,
+        OCO.natureza_codigo AS natureza_ocorrencia_codigo,
+        OCO.data_hora_fato,
+        ENV.ind_militar_policial_servico
+    FROM db_bisp_reds_reporting.tb_ocorrencia OCO
+    INNER JOIN db_bisp_reds_reporting.tb_envolvido_ocorrencia ENV
+        ON OCO.numero_ocorrencia = ENV.numero_ocorrencia
+    WHERE 1 = 1
+        AND OCO.natureza_codigo IN ('B01121','B01129') 
+        AND ENV.id_envolvimento IN (35,36,44) 
+        AND ENV.ind_militar_policial IS NOT DISTINCT FROM 'M'
+        AND ENV.ind_militar_policial_servico IS NOT DISTINCT FROM 'S' 
+        AND ENV.orgao_lotacao_policial_sigla = 'PM' 
+        AND YEAR(OCO.data_hora_fato) = 2025
+),
+
+-- CTE: BD_IMV - Envolvidos com óbito (condição física 0100) e que não são letalidade calculada na CTE anterior
+BD_IMV AS (
+    SELECT
+        OCO.numero_ocorrencia,                                   -- Identificador da ocorrência
+        ENV.envolvimento_codigo,                                 -- Código que representa o tipo de envolvimento (ex: vítima, testemunha, etc.)
+        ENV.envolvimento_descricao,                              -- Descrição textual do tipo de envolvimento
+        ENV.numero_envolvido,                                    -- Número sequencial do envolvido na ocorrência
+
+        -- Chave única construída com nome, nome da mãe e data de nascimento, com tratamento de casos desconhecidos
+        CONCAT(
+            CASE
+                WHEN UPPER(ENV.nome_completo_envolvido) IS NULL OR TRIM(UPPER(ENV.nome_completo_envolvido)) = ''
+                     OR UPPER(ENV.nome_completo_envolvido) LIKE '%DESCONHECID%' OR UPPER(ENV.nome_completo_envolvido) LIKE '%IGNORAD%'
+                     OR UPPER(ENV.nome_completo_envolvido) LIKE '%IDENTIFICA%' THEN
+                    CONCAT('DESCONHECIDO ', CAST(SUBSTRING(ENV.numero_ocorrencia, 6, 9) AS STRING), '0', CAST(ENV.numero_envolvido AS STRING))
+                ELSE UPPER(ENV.nome_completo_envolvido)
+            END,
+            '-',
+            CASE
+                WHEN UPPER(ENV.nome_mae) IS NULL OR TRIM(UPPER(ENV.nome_mae)) = ''
+                     OR UPPER(ENV.nome_mae) LIKE '%DESCONHECID%' OR UPPER(ENV.nome_mae) LIKE '%IGNORAD%' OR UPPER(ENV.nome_mae) LIKE '%IDENTIFICA%' THEN
+                    CONCAT(' MAE ', CAST(SUBSTRING(ENV.numero_ocorrencia, 6, 9) AS STRING), '0', CAST(ENV.numero_envolvido AS STRING))
+                ELSE UPPER(ENV.nome_mae)
+            END,
+            '-',
+            CASE
+                WHEN COALESCE(CAST(ENV.data_nascimento AS STRING), '') = '' THEN
+                    CONCAT('CAMPO NULO ', CAST(SUBSTRING(ENV.numero_ocorrencia, 6, 9) AS STRING), '0', CAST(ENV.numero_envolvido AS STRING))
+                ELSE CAST(ENV.data_nascimento AS STRING)
+            END
+        ) AS chave_envolvido,
+
+        -- Tratamento do nome do envolvido: se inválido ou ausente, gera rótulo "DESCONHECIDO"
+        CASE
+            WHEN UPPER(ENV.nome_completo_envolvido) IS NULL OR TRIM(UPPER(ENV.nome_completo_envolvido)) = ''
+                 OR UPPER(ENV.nome_completo_envolvido) LIKE '%DESCONHECID%' OR UPPER(ENV.nome_completo_envolvido) LIKE '%IGNORAD%'
+                 OR UPPER(ENV.nome_completo_envolvido) LIKE '%IDENTIFICAD%' THEN
+                CONCAT('DESCONHECIDO ', CAST(SUBSTRING(ENV.numero_ocorrencia, 6, 9) AS STRING), '0', CAST(ENV.numero_envolvido AS STRING))
+            ELSE UPPER(ENV.nome_completo_envolvido)
+        END AS nome_completo_envolvido,
+
+        -- Tratamento do nome da mãe: se inválido ou ausente, gera rótulo "MÃE"
+        CASE
+            WHEN UPPER(ENV.nome_mae) IS NULL OR TRIM(UPPER(ENV.nome_mae)) = ''
+                 OR UPPER(ENV.nome_mae) LIKE '%DESCONHECID%' OR UPPER(ENV.nome_mae) LIKE '%IGNORAD%' OR UPPER(ENV.nome_mae) LIKE '%IDENTIFICA%' THEN
+                CONCAT('MÃE ', CAST(SUBSTRING(ENV.numero_ocorrencia, 6, 9) AS STRING), '0', CAST(ENV.numero_envolvido AS STRING))
+            ELSE UPPER(ENV.nome_mae)
+        END AS nome_mae
+
+    FROM db_bisp_reds_reporting.tb_ocorrencia OCO
+    INNER JOIN db_bisp_reds_reporting.tb_envolvido_ocorrencia ENV ON OCO.numero_ocorrencia = ENV.numero_ocorrencia
+    LEFT JOIN LETALIDADE LET ON OCO.numero_ocorrencia = LET.numero_ocorrencia
+    WHERE 1 = 1
+        AND LET.numero_ocorrencia IS NULL 
+        AND ENV.id_envolvimento IN (25,32,1097,26,27,28,872) 
+        AND OCO.ind_estado = 'F' 
+        AND ENV.condicao_fisica_codigo = '0100' 
+        AND OCO.ocorrencia_uf = 'MG' 
+        AND ENV.natureza_ocorrencia_codigo IN ('B01121','C01157','B02001','B01129','B01148','B01504') 
+        AND OCO.digitador_sigla_orgao IN ('PM','PC') 
+        AND OCO.nome_tipo_relatorio IN ('POLICIAL','REFAP') 
+        AND OCO.local_imediato_codigo NOT IN ('1302','1310') 
+        AND YEAR(OCO.data_hora_fato) = 2025 
+        AND (OCO.unidade_responsavel_registro_nome LIKE '%/2 RPM' OR OCO.unidade_responsavel_registro_nome LIKE '%/2RPM' OR OCO.unidade_responsavel_registro_nome LIKE '%/2 CIA PM IND PVD%')
+),
+
+-- CTE: BD_CVPA - Cria um banco de dados de vítimas de ocorrências CVPA
+BD_CVPA AS 
+(
+    SELECT
+        OCO.numero_ocorrencia,
+        ENV.envolvimento_codigo,
+        ENV.envolvimento_descricao,
+        ENV.numero_envolvido
+    FROM db_bisp_reds_reporting.tb_ocorrencia OCO
+    INNER JOIN db_bisp_reds_reporting.tb_envolvido_ocorrencia ENV ON OCO.numero_ocorrencia = ENV.numero_ocorrencia
+    WHERE 1 = 1
+        AND ENV.id_envolvimento IN (25,32,1097,26,27,28,872) 
+        AND OCO.ocorrencia_uf = 'MG' 
+        AND OCO.ind_estado = 'F' 
+        AND ENV.condicao_fisica_codigo IS DISTINCT FROM '0100' 
+        AND ENV.ind_consumado IN ('S','N') 
+        AND OCO.digitador_sigla_orgao IN ('PM','PC') 
+        AND OCO.nome_tipo_relatorio IN ('POLICIAL','REFAP') 
+        AND OCO.local_imediato_codigo NOT IN ('1302','1310') 
+        AND ENV.natureza_ocorrencia_codigo IN ('C01157','C01158','C01159') 
+        AND YEAR(OCO.data_hora_fato) = 2025 
+        AND (OCO.unidade_responsavel_registro_nome LIKE '%/2 RPM' OR OCO.unidade_responsavel_registro_nome LIKE '%/2RPM' OR OCO.unidade_responsavel_registro_nome LIKE '%/2 CIA PM IND PVD%')
+),
+
+-- CTE: BD_CVPE - Cria um banco de dados de vítimas de ocorrências CVPE
+BD_CVPE AS 
+(
+    SELECT
+        OCO.numero_ocorrencia,
+        ENV.envolvimento_codigo,
+        ENV.envolvimento_descricao,
+        ENV.numero_envolvido
+    FROM db_bisp_reds_reporting.tb_ocorrencia OCO
+    INNER JOIN db_bisp_reds_reporting.tb_envolvido_ocorrencia ENV ON OCO.numero_ocorrencia = ENV.numero_ocorrencia
+    LEFT JOIN LETALIDADE LET ON OCO.numero_ocorrencia = LET.numero_ocorrencia
+WHERE 1=1                                                           -- Início das condições de filtro
+    AND LET.numero_ocorrencia IS NULL                              -- Exclui ocorrências que estão na CTE de letalidade
+    AND OCO.ind_estado = 'F'                                      -- Filtra apenas ocorrências finalizadas
+    AND OCO.ocorrencia_uf = 'MG'                                  -- Filtra apenas ocorrências de Minas Gerais
+    AND ENV.id_envolvimento IN (25,32,1097,26,27,28,872)          -- Filtra tipos específicos de envolvimento(Todos vitima)
+    AND ENV.natureza_ocorrencia_codigo IN ('B01121','B01148','B02001','B01504')  -- Filtra naturezas específicas(Homicídio,Sequestro e Cárcere Privado,Tortura, Feminicídio*)
+    AND ENV.condicao_fisica_codigo IS DISTINCT FROM '0100'          -- Exclui condição física específica(Fatal)
+    AND ENV.ind_consumado IN ('S','N')                            -- Filtra ocorrências consumadas e tentadas
+    AND OCO.local_imediato_codigo NOT IN('1302','1310')		-- Filtra ocorrências cujo local imediato nâo seja UNIDADE PRISIONAL (CERESP/PRESIDIO/PENITENCIARIA) ou CAEDEIA PUBLICA
+    AND OCO.digitador_sigla_orgao IN ('PM','PC')                  -- Filtra registros da PM ou PC
+    AND OCO.nome_tipo_relatorio IN ('POLICIAL','REFAP')           -- Filtra tipos específicos de relatório
+        AND YEAR(OCO.data_hora_fato) = 2025 
+        AND (OCO.unidade_responsavel_registro_nome LIKE '%/2 RPM' OR OCO.unidade_responsavel_registro_nome LIKE '%/2RPM' OR OCO.unidade_responsavel_registro_nome LIKE '%/2 CIA PM IND PVD%')
+),
+
+-- CTE: QTDE_CVPA - Conta vítimas de CVPA por ocorrência
+QTDE_CVPA AS (
+    SELECT
+        CVPA.numero_ocorrencia,
+        COUNT(*) AS total_vitimas_cpva
+    FROM BD_CVPA CVPA
+    GROUP BY CVPA.numero_ocorrencia
+),
+
+-- CTE: QTDE_CVPE - Conta vítimas de CVPE por ocorrência
+QTDE_CVPE AS (
+    SELECT
+        CVPE.numero_ocorrencia,
+        COUNT(*) AS total_vitimas_cpve
+    FROM BD_CVPE CVPE
+    GROUP BY CVPE.numero_ocorrencia
+),
+
+-- CTE: QTDE_IMV - Conta vítimas fatais por ocorrência
+QTDE_IMV AS (
+    SELECT
+        IMV.numero_ocorrencia,
+        COUNT(*) AS total_vitimas_imv
+    FROM BD_IMV IMV
+    GROUP BY IMV.numero_ocorrencia
+)
+
+-- Consulta principal com as ocorrências
+SELECT
+    OCO.numero_ocorrencia,
+    OCO.nome_bairro,
+    VO.numero_sequencial_viatura,
+    VO.placa,
+    VO.codigo_tipo_viatura,
+    OCO.nome_tipo_relatorio,
+    OCO.natureza_codigo,
+    OCO.natureza_descricao,
+    OCO.natureza_ind_consumado,
+    OCO.responsavel_apreensao_id_orgao,
+    OCO.ind_tco,
+    FROM_TIMESTAMP(OCO.data_hora_fato, 'dd/MM/yy') AS data_fato,
+    FROM_TIMESTAMP(OCO.data_hora_inclusao, 'HH') AS hora_inclusao,
+    QTDE_IMV.total_vitimas_imv,
+    QTDE_CVPA.total_vitimas_cpva,
+    QTDE_CVPE.total_vitimas_cpve,
+    OCO.unidade_area_militar_nome,
+    MUB.udi,
+    MUB.ueop,
+    MUB.cia,
+    MUB.codigo_espacial_pm AS setor_PM,
+    CASE
+        WHEN OCO.pais_codigo <> 1 AND OCO.ocorrencia_uf IS NULL THEN 'Outro_Pais'
+        WHEN OCO.ocorrencia_uf <> 'MG' THEN 'Outra_UF'
+        WHEN OCO.numero_latitude IS NULL THEN 'Invalido'
+        WHEN geo.situacao_codigo = 9 THEN 'Agua'
+        WHEN geo.situacao_zona IS NULL THEN 'Erro_Processamento'
+        ELSE geo.situacao_zona
+    END AS situacao_zona,
+    OCO.unidade_responsavel_registro_nome
+FROM db_bisp_reds_reporting.tb_ocorrencia OCO
+LEFT JOIN db_bisp_reds_reporting.tb_viatura_ocorrencia VO ON OCO.numero_ocorrencia = VO.numero_ocorrencia
+LEFT JOIN QTDE_IMV ON OCO.numero_ocorrencia = QTDE_IMV.numero_ocorrencia
+LEFT JOIN QTDE_CVPA ON OCO.numero_ocorrencia = QTDE_CVPA.numero_ocorrencia
+LEFT JOIN QTDE_CVPE ON OCO.numero_ocorrencia = QTDE_CVPE.numero_ocorrencia
+LEFT JOIN db_bisp_reds_master.tb_ocorrencia_setores_geodata AS geo ON OCO.numero_ocorrencia = geo.numero_ocorrencia AND OCO.ocorrencia_uf = 'MG'
+LEFT JOIN db_bisp_shared.tb_pmmg_setores_geodata AS MUB ON geo.setor_codigo = MUB.setor_codigo
+WHERE
+    OCO.digitador_id_orgao = 0 AND
+    OCO.ind_estado = 'F' AND
+    OCO.ocorrencia_uf = 'MG' AND
+    YEAR(OCO.data_hora_fato) = 2025 AND
+    (OCO.unidade_responsavel_registro_nome LIKE '%/2 RPM' OR OCO.unidade_responsavel_registro_nome LIKE '%/2RPM' OR OCO.unidade_responsavel_registro_nome LIKE '%/2 CIA PM IND PVD%')
+GROUP BY
+    1,  -- OCO.numero_ocorrencia
+    2,  -- OCO.nome_bairro
+    3,  -- VO.numero_sequencial_viatura
+    4,  -- VO.placa
+    5,  -- VO.codigo_tipo_viatura
+    6,  -- OCO.nome_tipo_relatorio
+    7,  -- OCO.natureza_codigo
+    8,  -- OCO.natureza_descricao
+    9,  -- OCO.natureza_ind_consumado
+    10, -- OCO.responsavel_apreensao_id_orgao
+    11, -- OCO.ind_tco
+    12, -- data_fato (FROM_TIMESTAMP(OCO.data_hora_fato, 'dd/MM/yy'))
+    13, -- hora_inclusao (FROM_TIMESTAMP(OCO.data_hora_inclusao, 'HH'))
+    14, -- QTDE_IMV.total_vitimas_imv
+    15, -- QTDE_CVPA.total_vitimas_cvpa
+    16, -- QTDE_CVPE.total_vitimas_cvpe 
+    17, -- OCO.unidade_area_militar_nome
+    18, -- MUB.udi
+    19, -- MUB.ueop
+    20, -- MUB.cia
+    21, -- setor_PM (MUB.codigo_espacial_pm)
+    22, -- 'situacao_zona' ibge
+    23; -- OCO.unidade_responsavel_registro_nome
